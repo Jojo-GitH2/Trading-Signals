@@ -19,6 +19,7 @@ timePast = today - timedelta(days=1095)
 
 # Use the symbol you have been given in place of GME – e.g. AMZN.
 data = pdr.get_data_yahoo("NVDA", start=timePast, end=today)
+# print(data)
 
 # Add two columns to allow for Buy and Sell signals
 # fill with zero
@@ -61,6 +62,7 @@ for i in range(2, len(data)):
 
 minhistory = 101
 shots = 10000
+count = 0
 for i in range(minhistory, len(data)):
     if data.Buy[i] == 1:  # if we’re interested in Buy signals
         mean = data.Close[i - minhistory : i].pct_change(1).mean()
@@ -71,4 +73,6 @@ for i in range(minhistory, len(data)):
         simulated.sort(reverse=True)
         var95 = simulated[int(len(simulated) * 0.95)]
         var99 = simulated[int(len(simulated) * 0.99)]
-        print(var95, var99)  # only so you can see what is being produced
+        count += 1
+
+        print(count, var95, var99)  # only so you can see what is being produced

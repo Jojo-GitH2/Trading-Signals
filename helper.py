@@ -1,15 +1,11 @@
 import boto3
+
+# import threading
+# from botocore.exceptions import ClientError
 from google.cloud import secretmanager
-import requests
-import json
 
-
-def calculate_ec2_billable_time(scale):
-    return 0.0116 * scale
-
-
-def calculate_ec2_rate(scale):
-    return 0.0116 * scale
+# import requests
+# import json
 
 
 def terminate_ec2_instances():
@@ -17,8 +13,36 @@ def terminate_ec2_instances():
     instances = ec2.instances.filter(
         Filters=[{"Name": "image-id", "Values": ["ami-0c101f26f147fa7fd"]}]
     )
+
+    # Store all security group IDs before terminating the instances
+    security_group_ids = set()  # Use a set to avoid duplicates
+    for instance in instances:
+        for sg in instance.security_groups:
+            security_group_ids.add(sg["GroupId"])
+    # print(security_group_ids)
+
+    # Terminate all instances
     for instance in instances:
         instance.terminate()
+
+    # Wait for all instances to be terminated
+    for instance in instances:
+        instance.wait_until_terminated()
+
+    # After all instances have been terminated, delete the Security Group
+    for sg_id in security_group_ids:
+        # Now delete the security group
+        ec2.SecurityGroup(sg_id).delete()
+
+    # Delete the VPC if it's not the default one
+    vpc_ids = set()  # Use a set to avoid duplicates
+    for instance in instances:
+        if instance.vpc_id and instance.vpc_id != "default":
+            vpc_ids.add(instance.vpc_id)
+
+    for vpc_id in vpc_ids:
+        ec2.Vpc(vpc_id).delete()
+
 
 # This takes too long to run because the json file is too large, about 320MB so I hard-coded the price to the function in main.py
 # def get_ec2_price(region_name="us-east-1", instance_type="t2.micro"):
@@ -49,3 +73,9 @@ def get_secret(project_id, secret_id, version_id="latest"):
     name = f"projects/{project_id}/secrets/{secret_id}/versions/{version_id}"
     response = client.access_secret_version(request={"name": name})
     return response.payload.data.decode("UTF-8")
+
+
+# def analyse(history, shots, buy_or_sell, no_of_days, scale):
+#     # Calculate number of Shots per instance
+#     shots_per_instance = shots // scale
+#     remainder = shots % scale
