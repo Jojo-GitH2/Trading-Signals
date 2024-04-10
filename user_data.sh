@@ -1,43 +1,24 @@
+#!/bin/bash
+sudo yum update -y
+sudo yum install -y python3 python3-pip && pip3 install --ignore-installed yfinance boto3
+cd /home/ec2-user
+echo '
+import yfinance as yf
+from datetime import date, timedelta
 import sys
 import math
 import random
-import yfinance as yf
-from datetime import date, timedelta
-
-# # import json
-
-# Get the input parameters from the command line arguments
-h = 101  # int(sys.argv[1])
-d = 10000  # int(sys.argv[2])
-t = "sell"  # sys.argv[3]
-p = 7  # int(sys.argv[4])
-
-# h = int(sys.argv[1])
-# d = int(sys.argv[2])
-# t = sys.argv[3]
-# p = int(sys.argv[4])
+import json
 
 
-# Initialize the results
-# results = {"var95": [], "var99": [], "profit_loss": []}
-
-
-# Get stock data from Yahoo Finance
 def risk_analysis(h, d, t, p):
     # Get stock data from Yahoo Finance
-
     today = date.today()
     timePast = today - timedelta(days=h)
     data = yf.download("NVDA", start=timePast, end=today)
     results = {"var95": [], "var99": [], "profit_loss": []}
-    print(data)
-
     # Convert the data to a list of lists
     data_list = [list(row) for row in data.values]
-    print(data_list)
-    # print(len(data_list))
-
-    count = 0
 
     # Perform the risk analysis for each signal
     for i in range(2, len(data_list)):
@@ -65,20 +46,24 @@ def risk_analysis(h, d, t, p):
 
         if (signal == 1 and t == "buy") or (signal == -1 and t == "sell"):
             # Generate d simulated returns
+            # pct_changes = [
+            #     ((data_list[j][3] - data_list[j - 1][3]) / data_list[j - 1][3])
+            #     for j in range(i - h + 1, i)
+            # ]
+            # mean = sum(pct_changes) / len(pct_changes)
+            # std = math.sqrt(
+            #     sum([(x - mean) ** 2 for x in pct_changes]) / len(pct_changes)
+            # )
             mean = sum([row[3] for row in data_list[i - h : i]]) / h
             std = math.sqrt(
                 sum([(row[3] - mean) ** 2 for row in data_list[i - h : i]]) / h
             )
-            count += 1
             simulated = [random.gauss(mean, std) for _ in range(d)]
-            # print(len(simulated))
-            # print(simulated)
 
             # Calculate the 95% and 99% VaR
             simulated.sort(reverse=True)
             var95 = simulated[int(len(simulated) * 0.95)]
             var99 = simulated[int(len(simulated) * 0.99)]
-            
             results["var95"].append(var95)
             results["var99"].append(var99)
 
@@ -86,13 +71,19 @@ def risk_analysis(h, d, t, p):
             if i + p < len(data_list):
                 if t == "buy":
                     profit_loss = data_list[i + p][3] - data_list[i][3]
-                elif t == "sell":  # t == "sell"
+                elif t == "sell":
                     profit_loss = data_list[i][3] - data_list[i + p][3]
                 results["profit_loss"].append(profit_loss)
-    # return json.dumps(results)
-    return results
+    with open("/home/ec2-user/data.json", "w") as f:
+        json.dump(results, f)
 
 
-# # Output the results as JSON
-print(risk_analysis(h, d, t, p))
-# # print(json.dumps(results))
+if __name__ == "__main__":
+    h = int(sys.argv[1])
+    d = int(sys.argv[2])
+    t = sys.argv[3]
+    p = int(sys.argv[4])
+    risk_analysis(h, d, t, p)' > /home/ec2-user/risk_analysis.py
+sudo chmod 755 /home/ec2-user/risk_analysis.py
+sudo chown ec2-user:ec2-user /home/ec2-user/risk_analysis.py
+nohup python3 -m http.server 5000 &

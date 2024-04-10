@@ -4,7 +4,11 @@ import json
 import helper
 import os
 import time
-import risk_analysis
+import base64
+import numpy as np
+import requests
+
+# import risk_analysis
 
 app = Flask(__name__)
 
@@ -52,8 +56,8 @@ warmup_state = {
     "instances": [],
 }
 
-has_run = False
 table_name = "trading-signals-results"
+# endpoints = {}
 
 
 results = {}
@@ -73,7 +77,6 @@ def home():
 @app.route("/warmup", methods=["POST"])
 def warmup():
     try:
-        global has_run
         # Get the input parameters
         data = request.get_json()
         s = data.get("service")
@@ -85,88 +88,9 @@ def warmup():
 
         # Call the Lambda function
         # lambda_client = boto3.client("lambda")
-        user_data = """
-#!/bin/bash
-sudo yum update -y
-sudo yum install -y python3 python3-pip
-pip3 install yfinance boto3
-echo '
-import yfinance as yf
-from datetime import date, timedelta
-import sys
-import math
-import random
-import json
-
-def risk_analysis(h, d, t, p):
-    # Get stock data from Yahoo Finance
-    today = date.today()
-    timePast = today - timedelta(days=h)
-    data = yf.download("NVDA", start=timePast, end=today)
-    results = {"var95": [], "var99": [], "profit_loss": []}
-    # Convert the data to a list of lists
-    data_list = [list(row) for row in data.values]
-    count = 0
-    # Perform the risk analysis for each signal
-    for i in range(2, len(data_list)):
-        body = 0.01
-        # Three Soldiers
-        if (
-            (data_list[i][3] - data_list[i][0]) >= body 
-            and data_list[i][3] > data_list[i - 1][3]
-            and (data_list[i - 1][3] - data_list[i - 1][0]) >= body 
-            and data_list[i - 1][3] > data_list[i - 2][3] 
-            and (data_list[i - 2][3] - data_list[i - 2][0]) >= body
-        ):
-            signal = 1
-        # Three Crows
-        elif (
-            (data_list[i][0] - data_list[i][3]) >= body
-            and data_list[i][3] < data_list[i - 1][3]
-            and (data_list[i - 1][0] - data_list[i - 1][3]) >= body
-            and data_list[i - 1][3] < data_list[i - 2][3]
-            and (data_list[i - 2][0] - data_list[i - 2][3]) >= body
-        ):
-            signal = -1
-        else:
-            signal = 0
-
-        if (signal == 1 and t == "buy") or (signal == -1 and t == "sell"):
-            # Generate d simulated returns
-            mean = sum([row[3] for row in data_list[i - h : i]]) / h
-            std = math.sqrt(
-                sum([(row[3] - mean) ** 2 for row in data_list[i - h : i]]) / h
-            )
-            simulated = [random.gauss(mean, std) for _ in range(d)]
-            # print(simulated)
-
-            # Calculate the 95% and 99% VaR
-            simulated.sort(reverse=True)
-            var95 = simulated[int(len(simulated) * 0.95)]
-            var99 = simulated[int(len(simulated) * 0.99)]
-            count += 1
-            results["var95"].append(var95)
-            results["var99"].append(var99)
-
-            # Calculate the profit or loss
-            if i + p < len(data_list):
-                if t == "buy":
-                    profit_loss = data_list[i + p][3] - data_list[i][3]
-                else:  # t == "sell"
-                    profit_loss = data_list[i][3] - data_list[i + p][3]
-                results["profit_loss"].append(profit_loss)
-    # return json.dumps(results)
-    with open('/home/ec2-user/data.json', 'w') as f:
-        json.dump(results, f)
-
-if __name__ == "__main__":
-    h = int(sys.argv[1])
-    d = int(sys.argv[2])
-    t = sys.argv[3]
-    p = int(sys.argv[4])
-    risk_analysis(h, d, t, p)
-    ' > /home/ec2-user/risk_analysis.py
-"""
+        with open("user_data.sh", "r") as f:
+            user_data = f.read()
+        user_data_encoded = base64.b64encode(user_data.encode()).decode()
 
         # input_params = {
         #     "service": s,
@@ -228,16 +152,22 @@ if __name__ == "__main__":
                         "ToPort": 22,
                         "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
                     },
-                    {
-                        "IpProtocol": "tcp",
-                        "FromPort": 80,
-                        "ToPort": 80,
-                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
-                    },
+                    # {
+                    #     "IpProtocol": "tcp",
+                    #     "FromPort": 80,
+                    #     "ToPort": 80,
+                    #     "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                    # },
                     {
                         "IpProtocol": "tcp",
                         "FromPort": 443,
                         "ToPort": 443,
+                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": 80,
+                        "ToPort": 5000,
                         "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
                     },
                 ],
@@ -264,8 +194,9 @@ if __name__ == "__main__":
                 MaxCount=int(abs(r - count)),
                 MinCount=int(abs(r - count)),
                 KeyName="vockey",
-                UserData=user_data,
+                UserData=user_data_encoded,
                 SecurityGroupIds=[security_group_id],
+                IamInstanceProfile={"Name": "LabInstanceProfile"},
             )
             instances_ids = [
                 instance["InstanceId"] for instance in response["Instances"]
@@ -278,7 +209,6 @@ if __name__ == "__main__":
             ]
         else:
             pass
-        has_run = True
         # response = lambda_client.invoke(
         #     FunctionName="warmup_services",
         #     InvocationType="RequestResponse",
@@ -355,30 +285,93 @@ def analyse():
         "no_of_days"
     )  # the number of data points (shots) to generate in each r for calculating risk via simulated returns
     if warmup_state["service"].lower() == "ec2":
-        # ssm = boto3.client("ssm")
-        dynamodb = boto3.resource("dynamodb")
-        table = dynamodb.Table(table_name)
+        instances = warmup_state["instances"]
 
-    # results = risk_analysis.risk_analysis(h, d, t, p)
-    # # Calculate number of Shots per instance
-    # shots_per_instance = d // len(warmup_state["instances"])
-    # remainder = d % len(warmup_state["instances"])
-    return jsonify({"result": "ok", "results": results})
+        # Input Parameters for the Lambda function
+        input_params = {
+            "h": h,
+            "d": d,
+            "t": t,
+            "p": p,
+            "s": warmup_state["service"],
+            "r": warmup_state["scale"],
+            "table_name": table_name,
+        }
+
+        # Invoke the Lambda function
+        lambda_client = boto3.client("lambda")
+        for instance_id in instances:
+            input_params["instance_id"] = instance_id
+            response = lambda_client.invoke(
+                FunctionName="risk_analysis",
+                InvocationType="Event",
+                Payload=json.dumps(input_params),
+            )
+            print(response["Payload"].read().decode("utf-8"))
+
+        # response_payload = json.load(response["Payload"])
+        # command_ids = response_payload["body"]
+        return jsonify({"result": "ok"})  # , "command_ids": command_ids})
+        # dynamodb = boto3.resource("dynamodb")
+        # table = dynamodb.Table(table_name)
 
 
 @app.route("/get_sig_vars9599", methods=["GET"])
 def get_sig_vars9599():
-    # Retrieve the VaR values from the results
-    # var95 = [result["var95"] for result in results.values()]
-    # var99 = [result["var99"] for result in results.values()]
     try:
-        var95 = results["var95"]
-        var99 = results["var99"]
+        # Initialize the results for the VaR values
+        var95 = []
+        var99 = []
+        endpoints = get_endpoints().get_json()
+
+        # Fetch data.json from each endpoint
+        for url in endpoints.values():
+            url = f"http://{url}:5000/data.json"
+            response = requests.get(url)
+            data = response.json()
+            var95.append(data["var95"])
+            var99.append(data["var99"])
+
+        # Convert to numpy arrays
+        var95 = np.array(var95)
+        var99 = np.array(var99)
+
+        #  Calculate average across parallel computations per index
+        var95 = list(np.mean(var95, axis=0))
+        var99 = list(np.mean(var99, axis=0))
     except KeyError:
         return jsonify({"error": "No results available"})
     return jsonify({"var95": var95, "var99": var99})
 
-    # return jsonify({"var95": results["var95"], "var99": results["var99"]})
+
+@app.route("/get_avg_vars9599", methods=["GET"])
+def get_avg_vars9599():
+    vaRs_9599 = get_sig_vars9599().get_json()
+    avg_var95 = sum(vaRs_9599["var95"]) / len(vaRs_9599["var95"])
+    avg_var99 = sum(vaRs_9599["var99"]) / len(vaRs_9599["var99"])
+    return jsonify({"var95": avg_var95, "var99": avg_var99})
+
+
+@app.route("/get_sig_profit_loss", methods=["GET"])
+def get_sig_profit_loss():
+    endpoints = get_endpoints().get_json()
+
+    profit_loss = []
+    # Fetch data.json from each endpoint
+    for url in endpoints.values():
+        url = f"http://{url}:5000/data.json"
+        response = requests.get(url)
+        data = response.json()
+        profit_loss.extend(data["profit_loss"])
+        break
+    return jsonify({"profit_loss": profit_loss})
+
+
+@app.route("/get_tot_profit_loss", methods=["GET"])
+def get_tot_profit_loss():
+    profit_loss = get_sig_profit_loss().get_json()["profit_loss"]
+    total_profit_loss = sum(profit_loss)
+    return jsonify({"profit_loss": total_profit_loss})
 
 
 @app.route("/terminate", methods=["GET"])
