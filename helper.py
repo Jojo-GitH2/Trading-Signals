@@ -1,11 +1,5 @@
 import boto3
-
-# import threading
-# from botocore.exceptions import ClientError
 from google.cloud import secretmanager
-
-# import requests
-# import json
 
 
 def terminate_ec2_instances():
@@ -44,6 +38,12 @@ def terminate_ec2_instances():
         ec2.Vpc(vpc_id).delete()
 
 
+def terminate_dynamodb_tables(table_name):
+    dynamodb = boto3.resource("dynamodb")
+    table = dynamodb.Table(table_name)
+    table.delete()
+
+
 # This takes too long to run because the json file is too large, about 320MB so I hard-coded the price to the function in main.py
 # def get_ec2_price(region_name="us-east-1", instance_type="t2.micro"):
 #     url = f"https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/{region_name}/index.json"
@@ -73,9 +73,3 @@ def get_secret(project_id, secret_id, version_id="latest"):
     name = f"projects/{project_id}/secrets/{secret_id}/versions/{version_id}"
     response = client.access_secret_version(request={"name": name})
     return response.payload.data.decode("UTF-8")
-
-
-# def analyse(history, shots, buy_or_sell, no_of_days, scale):
-#     # Calculate number of Shots per instance
-#     shots_per_instance = shots // scale
-#     remainder = shots % scale

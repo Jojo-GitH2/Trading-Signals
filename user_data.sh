@@ -1,6 +1,6 @@
 #!/bin/bash
 sudo yum update -y
-sudo yum install -y python3 python3-pip && pip3 install --ignore-installed yfinance boto3
+sudo yum install -y python3 python3-pip && pip3 install --ignore-installed yfinance
 cd /home/ec2-user
 echo '
 import yfinance as yf
@@ -19,6 +19,9 @@ def risk_analysis(h, d, t, p):
     results = {"var95": [], "var99": [], "profit_loss": []}
     # Convert the data to a list of lists
     data_list = [list(row) for row in data.values]
+    daily_returns = [
+        (data_list[i][3] - data_list[i - 1][3]) / data_list[i - 1][3] for i in range(1, len(data_list))
+    ]
 
     # Perform the risk analysis for each signal
     for i in range(2, len(data_list)):
@@ -46,18 +49,11 @@ def risk_analysis(h, d, t, p):
 
         if (signal == 1 and t == "buy") or (signal == -1 and t == "sell"):
             # Generate d simulated returns
-            # pct_changes = [
-            #     ((data_list[j][3] - data_list[j - 1][3]) / data_list[j - 1][3])
-            #     for j in range(i - h + 1, i)
-            # ]
-            # mean = sum(pct_changes) / len(pct_changes)
-            # std = math.sqrt(
-            #     sum([(x - mean) ** 2 for x in pct_changes]) / len(pct_changes)
-            # )
-            mean = sum([row[3] for row in data_list[i - h : i]]) / h
-            std = math.sqrt(
-                sum([(row[3] - mean) ** 2 for row in data_list[i - h : i]]) / h
-            )
+            pct_change = [daily_returns[i - h : i]][0]
+
+            mean = sum(pct_change) / h
+            std = math.sqrt(sum([(x - mean) ** 2 for x in pct_change]) / h)
+
             simulated = [random.gauss(mean, std) for _ in range(d)]
 
             # Calculate the 95% and 99% VaR

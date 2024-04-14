@@ -7,6 +7,7 @@ import time
 import base64
 import numpy as np
 import requests
+import datetime
 
 # import risk_analysis
 
@@ -115,10 +116,10 @@ def warmup():
                 table = dynamodb.create_table(
                     TableName=table_name,
                     KeySchema=[
-                        {"AttributeName": "CommandId", "KeyType": "HASH"},
+                        {"AttributeName": "timestamp", "KeyType": "HASH"},
                     ],
                     AttributeDefinitions=[
-                        {"AttributeName": "CommandId", "AttributeType": "S"},
+                        {"AttributeName": "timestamp", "AttributeType": "S"},
                     ],
                     BillingMode="PAY_PER_REQUEST",
                 )
@@ -201,25 +202,30 @@ def warmup():
             instances_ids = [
                 instance["InstanceId"] for instance in response["Instances"]
             ]
-        elif count == r:
+
+            if count > 0:
+                # Add IDs of the existing instances to the list
+                instances_ids.extend(
+                    instance["InstanceId"]
+                    for reservation in instances_running["Reservations"]
+                    for instance in reservation["Instances"]
+                )
+        # elif count == r:
+        # instances_ids = [
+        #     instance["InstanceId"]
+        #     for reservation in instances_running["Reservations"]
+        #     for instance in reservation["Instances"]
+        # ]
+        else:
             instances_ids = [
                 instance["InstanceId"]
                 for reservation in instances_running["Reservations"]
                 for instance in reservation["Instances"]
             ]
-        else:
-            pass
-        # response = lambda_client.invoke(
-        #     FunctionName="warmup_services",
-        #     InvocationType="RequestResponse",
-        #     Payload=json.dumps(input_params),
-        # )
 
         end_time = time.time()
         warmup_state["warmup_time"] = end_time - start_time
-        # response_payload = json.load(response["Payload"])
 
-        # if response_payload["statusCode"] == 200:
         if instances_ids != list():
             warmup_state["warm"] = True
             warmup_state["terminated"] = False
@@ -232,12 +238,17 @@ def warmup():
 
 @app.route("/scaled_ready", methods=["GET"])
 def scaled_ready():
-    ec2 = boto3.resource("ec2")
-    for instances in warmup_state["instances"]:
-        instance = ec2.Instance(instances)
-        if instance.state["Name"] != "running":
+    ec2 = boto3.client("ec2")
+    response = ec2.describe_instance_status(InstanceIds=warmup_state["instances"])
+    for instance in response["InstanceStatuses"]:
+        if (
+            instance["InstanceState"]["Name"] != "running"
+            or instance["InstanceStatus"]["Status"] != "ok"
+        ):
             warmup_state["warm"] = False
             break
+    else:
+        warmup_state["warm"] = True
 
     return jsonify({"warm": warmup_state["warm"]})
 
@@ -268,7 +279,10 @@ def get_endpoints():
         instance = ec2.Instance(instances)
         count += 1
         endpoints[f"endpoint {count}"] = instance.public_dns_name
-    return jsonify(endpoints)
+    return jsonify(
+        endpoints,
+        "// Attach :5000/data.json to the end of the public dns name to see results of individual instances after running analysis",
+    )  # Attach :5000/data.json to the end of the public dns name to see results of individual instances
 
 
 @app.route("/analyse", methods=["POST"])
@@ -285,6 +299,9 @@ def analyse():
         "no_of_days"
     )  # the number of data points (shots) to generate in each r for calculating risk via simulated returns
     if warmup_state["service"].lower() == "ec2":
+        lambda_client = boto3.client("lambda")
+        dynamodb = boto3.resource("dynamodb")
+        table = dynamodb.Table(table_name)
         instances = warmup_state["instances"]
 
         # Input Parameters for the Lambda function
@@ -293,13 +310,9 @@ def analyse():
             "d": d,
             "t": t,
             "p": p,
-            "s": warmup_state["service"],
-            "r": warmup_state["scale"],
-            "table_name": table_name,
         }
 
         # Invoke the Lambda function
-        lambda_client = boto3.client("lambda")
         for instance_id in instances:
             input_params["instance_id"] = instance_id
             response = lambda_client.invoke(
@@ -307,63 +320,82 @@ def analyse():
                 InvocationType="Event",
                 Payload=json.dumps(input_params),
             )
-            print(response["Payload"].read().decode("utf-8"))
 
-        # response_payload = json.load(response["Payload"])
-        # command_ids = response_payload["body"]
-        return jsonify({"result": "ok"})  # , "command_ids": command_ids})
-        # dynamodb = boto3.resource("dynamodb")
-        # table = dynamodb.Table(table_name)
+        averages = get_avg_vars9599().get_json()
+
+        table.put_item(
+            Item={
+                "timestamp": datetime.datetime.now().isoformat(),
+                "s": warmup_state["service"],
+                "r": warmup_state["scale"],
+                "h": h,
+                "d": d,
+                "t": t,
+                "p": p,
+                "av95": str(averages["var95"]),
+                "av99": str(averages["var99"]),
+                "profit_loss": str(get_tot_profit_loss().get_json()["profit_loss"]),
+            }
+        )
+
+        return jsonify({"result": "ok"})
 
 
 @app.route("/get_sig_vars9599", methods=["GET"])
 def get_sig_vars9599():
-    try:
-        # Initialize the results for the VaR values
-        var95 = []
-        var99 = []
-        endpoints = get_endpoints().get_json()
+    # Initialize the results for the VaR values
+    var95 = []
+    var99 = []
+    endpoints = get_endpoints().get_json()[0]
 
-        # Fetch data.json from each endpoint
-        for url in endpoints.values():
-            url = f"http://{url}:5000/data.json"
-            response = requests.get(url)
+    # Fetch data.json from each endpoint
+    for url in endpoints.values():
+        url = f"http://{url}:5000/data.json"
+        response = requests.get(url)
+        try:
             data = response.json()
-            var95.append(data["var95"])
-            var99.append(data["var99"])
+        except requests.exceptions.JSONDecodeError:
+            return jsonify({"var95": [], "var99": []})
 
-        # Convert to numpy arrays
-        var95 = np.array(var95)
-        var99 = np.array(var99)
+        var95.append(data["var95"])
+        var99.append(data["var99"])
 
-        #  Calculate average across parallel computations per index
-        var95 = list(np.mean(var95, axis=0))
-        var99 = list(np.mean(var99, axis=0))
-    except KeyError:
-        return jsonify({"error": "No results available"})
+    # Convert to numpy arrays
+    var95 = np.array(var95)
+    var99 = np.array(var99)
+
+    #  Calculate average across parallel computations per index
+    var95 = list(np.mean(var95, axis=0))
+    var99 = list(np.mean(var99, axis=0))
     return jsonify({"var95": var95, "var99": var99})
 
 
 @app.route("/get_avg_vars9599", methods=["GET"])
 def get_avg_vars9599():
-    vaRs_9599 = get_sig_vars9599().get_json()
-    avg_var95 = sum(vaRs_9599["var95"]) / len(vaRs_9599["var95"])
-    avg_var99 = sum(vaRs_9599["var99"]) / len(vaRs_9599["var99"])
+    try:
+        vaRs_9599 = get_sig_vars9599().get_json()
+        avg_var95 = sum(vaRs_9599["var95"]) / len(vaRs_9599["var95"])
+        avg_var99 = sum(vaRs_9599["var99"]) / len(vaRs_9599["var99"])
+    except (requests.exceptions.JSONDecodeError, ZeroDivisionError):
+        return jsonify({"var95": "0.0", "var99": "0.0"})
     return jsonify({"var95": avg_var95, "var99": avg_var99})
 
 
 @app.route("/get_sig_profit_loss", methods=["GET"])
 def get_sig_profit_loss():
-    endpoints = get_endpoints().get_json()
+    endpoints = get_endpoints().get_json()[0]
+    try:
+        profit_loss = []
+        # Fetch data.json from each endpoint
+        for url in endpoints.values():
+            url = f"http://{url}:5000/data.json"
+            response = requests.get(url)
+            data = response.json()
+            profit_loss.extend(data["profit_loss"])
+            break
+    except requests.exceptions.JSONDecodeError:
+        return jsonify({"profit_loss": []})
 
-    profit_loss = []
-    # Fetch data.json from each endpoint
-    for url in endpoints.values():
-        url = f"http://{url}:5000/data.json"
-        response = requests.get(url)
-        data = response.json()
-        profit_loss.extend(data["profit_loss"])
-        break
     return jsonify({"profit_loss": profit_loss})
 
 
@@ -371,7 +403,62 @@ def get_sig_profit_loss():
 def get_tot_profit_loss():
     profit_loss = get_sig_profit_loss().get_json()["profit_loss"]
     total_profit_loss = sum(profit_loss)
+    # except requests.exceptions.JSONDecodeError:
+    #     return jsonify({"profit_loss": "0.0"})
     return jsonify({"profit_loss": total_profit_loss})
+
+
+@app.route("/get_chart_url", methods=["GET"])
+def get_chart_url():
+    # Fetch 95% and 99% VaR values
+    sig_vars9599 = get_sig_vars9599().get_json()
+    avg_vars9599 = get_avg_vars9599().get_json()
+
+    # Prepare data for the chart
+    var95_values = ",".join(map(str, sig_vars9599["var95"]))
+    var99_values = ",".join(map(str, sig_vars9599["var99"]))
+    avg_var95_values = ",".join(
+        [str(avg_vars9599["var95"])] * len(sig_vars9599["var95"])
+    )
+    avg_var99_values = ",".join(
+        [str(avg_vars9599["var99"])] * len(sig_vars9599["var99"])
+    )
+
+    # Generate the chart URL
+    chart_url = f"https://image-charts.com/chart?cht=lc&chs=750x350&chd=a:{var95_values}|{var99_values}|{avg_var95_values}|{avg_var99_values}&chxt=x,y&chxl=1:|%+risk+values&chtt=Risk+Values+Chart&chdl=Var95|Var99|Avg_Var95|Avg_Var99&chg=10,10"
+    return jsonify({"url": chart_url})
+
+
+@app.route("/audit", methods=["GET"])
+def audit():
+    # Fetch the results from the DynamoDB table
+    dynamodb = boto3.resource("dynamodb")
+    table = dynamodb.Table(table_name)
+    response = table.scan()
+    items = response["Items"]
+    return jsonify(items)
+
+
+@app.route("/reset", methods=["GET"])
+def reset():
+    ec2 = boto3.resource("ec2")
+    lambda_client = boto3.client("lambda")
+
+    for instance_id in warmup_state["instances"]:
+        instance = ec2.Instance(instance_id)
+
+        # Input Parameters for the Lambda function
+        input_params = {
+            "instance_id": instance.id,
+        }
+
+        # Invoke the Lambda function
+        response = lambda_client.invoke(
+            FunctionName="reset",  # replace with your actual Lambda function name
+            InvocationType="Event",
+            Payload=json.dumps(input_params),
+        )
+    return jsonify({"result": "ok"})
 
 
 @app.route("/terminate", methods=["GET"])
@@ -381,6 +468,7 @@ def terminate():
     if s != None:
         if s.lower() == "ec2":
             helper.terminate_ec2_instances()
+            helper.terminate_dynamodb_tables(table_name)
 
     warmup_state["warm"] = False
     warmup_state["service"] = None
