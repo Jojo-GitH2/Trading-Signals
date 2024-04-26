@@ -227,7 +227,7 @@ def warmup():
 
 @app.route("/scaled_ready", methods=["GET"])
 def scaled_ready():
-    if len(warmup_state["instances"]) == 0 :
+    if len(warmup_state["instances"]) == 0:
         return jsonify({"warm": False})
     ec2 = boto3.client("ec2")
     response = ec2.describe_instance_status(InstanceIds=warmup_state["instances"])
@@ -327,7 +327,6 @@ def analyse():
 
         averages = get_avg_vars9599().get_json()
 
-
         table.put_item(
             Item={
                 "timestamp": datetime.datetime.now().isoformat(),
@@ -423,9 +422,9 @@ def get_time_cost():
 
     if response["Items"]:
         # Sort the items by timestamp in descending order and get the latest item
-        latest = sorted(
-            response["Items"], key=lambda x: x["timestamp"], reverse=True
-        )[0]
+        latest = sorted(response["Items"], key=lambda x: x["timestamp"], reverse=True)[
+            0
+        ]
         return jsonify(time=latest["time"], cost=latest["cost"])
     else:
         return jsonify(error="No items found"), 404
