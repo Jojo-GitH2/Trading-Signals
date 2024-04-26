@@ -9,9 +9,11 @@ import sys
 import math
 import random
 import json
+import time
 
 
 def risk_analysis(h, d, t, p):
+    start_time = time.time()
     # Get stock data from Yahoo Finance
     today = date.today()
     timePast = today - timedelta(days=h)
@@ -70,6 +72,7 @@ def risk_analysis(h, d, t, p):
                 elif t == "sell":
                     profit_loss = data_list[i][3] - data_list[i + p][3]
                 results["profit_loss"].append(profit_loss)
+    results["execution_time"] = time.time() - start_time
     with open("/home/ec2-user/data.json", "w") as f:
         json.dump(results, f)
 

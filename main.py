@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, render_template
 import boto3
+from boto3.dynamodb.conditions import Key
 import json
 import helper
 import os
@@ -8,12 +9,14 @@ import base64
 import numpy as np
 import requests
 import datetime
+import threading
 
 # import risk_analysis
 
 app = Flask(__name__)
 
 os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+
 # Run one of this on the command line before running the code below:
 # To create a secret with the AWS credentials in the Google Secret Manager
 # gcloud secrets create aws-credentials  --data-file=C:\Users\Lawal\.aws\credentials --project=trading-signals-418515
@@ -21,31 +24,32 @@ os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
 # To Update the secret with the AWS credentials in the Google Secret Manager
 # gcloud secrets versions add aws-credentials --data-file=C:\Users\Lawal\.aws\credentials --project=trading-signals-418515
 
-# Authenticate with AWS
-# aws_credentials = helper.get_secret(
-#     project_id="trading-signals-418515", secret_id="aws-credentials"
-# )
+if os.getenv("GAE_ENV", "").startswith("standard"):
+    # Authenticate with AWS
+    aws_credentials = helper.get_secret(
+        project_id="trading-signals-418515", secret_id="aws-credentials"
+    )
 
-# try:
-#     lines = aws_credentials.split("\n")
-#     if len(lines) < 4:
-#         raise ValueError("Invalid AWS credentials format")
+    try:
+        lines = aws_credentials.split("\n")
+        if len(lines) < 4:
+            raise ValueError("Invalid AWS credentials format")
 
-#     aws_access_key_id = lines[1].split("=")[1].strip()
-#     aws_secret_access_key = lines[2].split("=")[1].strip()
-#     aws_session_token = lines[3].split("=")[1].strip()
+        aws_access_key_id = lines[1].split("=")[1].strip()
+        aws_secret_access_key = lines[2].split("=")[1].strip()
+        aws_session_token = lines[3].split("=")[1].strip()
 
-# except IndexError:
-#     print("Error: AWS credentials file is not in the expected format.")
-# except ValueError as ve:
-#     print(f"Error: {ve}")
+    except IndexError:
+        print("Error: AWS credentials file is not in the expected format.")
+    except ValueError as ve:
+        print(f"Error: {ve}")
 
-# # Configure boto3 with your AWS credentials
-# boto3.setup_default_session(
-#     aws_access_key_id=aws_access_key_id,
-#     aws_secret_access_key=aws_secret_access_key,
-#     aws_session_token=aws_session_token,
-# )
+    # Configure boto3 with your AWS credentials
+    boto3.setup_default_session(
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        aws_session_token=aws_session_token,
+    )
 
 warmup_state = {
     "warm": False,
@@ -58,7 +62,6 @@ warmup_state = {
 }
 
 table_name = "trading-signals-results"
-# endpoints = {}
 
 
 results = {}
@@ -80,23 +83,15 @@ def warmup():
     try:
         # Get the input parameters
         data = request.get_json()
-        s = data.get("service")
-        r = data.get("scale")
+        s = data.get("s")
+        r = int(data.get("r"))
 
         # Store the service in the warmup_state
         warmup_state["service"] = s
         warmup_state["scale"] = r
-
-        # Call the Lambda function
-        # lambda_client = boto3.client("lambda")
         with open("user_data.sh", "r") as f:
             user_data = f.read()
         user_data_encoded = base64.b64encode(user_data.encode()).decode()
-
-        # input_params = {
-        #     "service": s,
-        #     "scale": r,
-        # }
 
         instances_ids = []
 
@@ -210,12 +205,6 @@ def warmup():
                     for reservation in instances_running["Reservations"]
                     for instance in reservation["Instances"]
                 )
-        # elif count == r:
-        # instances_ids = [
-        #     instance["InstanceId"]
-        #     for reservation in instances_running["Reservations"]
-        #     for instance in reservation["Instances"]
-        # ]
         else:
             instances_ids = [
                 instance["InstanceId"]
@@ -238,6 +227,8 @@ def warmup():
 
 @app.route("/scaled_ready", methods=["GET"])
 def scaled_ready():
+    if len(warmup_state["instances"]) == 0 :
+        return jsonify({"warm": False})
     ec2 = boto3.client("ec2")
     response = ec2.describe_instance_status(InstanceIds=warmup_state["instances"])
     for instance in response["InstanceStatuses"]:
@@ -258,10 +249,13 @@ def get_warmup_cost():
     if not warmup_state["warm"]:
         return jsonify({"cost": warmup_state["cost"]})
     if warmup_state["service"] == "ec2":
-        price_per_instance = 0.0116
-    warmup_state["cost"] = (
-        f'${price_per_instance * warmup_state["scale"] * warmup_state["warmup_time"]:.2f}'
-    )
+        price_per_instance = 0.0116 / 3600  # Price per instance per second
+        price_dynamodb = 1.25 / 730 / 60 / 60  # Price per second
+        instance_cost = (
+            price_per_instance * warmup_state["scale"] * warmup_state["warmup_time"]
+        )
+        dynamodb_cost = price_dynamodb * warmup_state["warmup_time"]
+    warmup_state["cost"] = f"${instance_cost + dynamodb_cost:.5f}"
     return jsonify(
         {
             "billable_time": f'{round(warmup_state["warmup_time"], 2)} seconds',
@@ -278,25 +272,26 @@ def get_endpoints():
     for instances in warmup_state["instances"]:
         instance = ec2.Instance(instances)
         count += 1
-        endpoints[f"endpoint {count}"] = instance.public_dns_name
+        endpoints[f"endpoint {count}"] = (
+            f"http://{instance.public_dns_name}:5000/data.json"
+        )
     return jsonify(
         endpoints,
-        "// Attach :5000/data.json to the end of the public dns name to see results of individual instances after running analysis",
-    )  # Attach :5000/data.json to the end of the public dns name to see results of individual instances
+    )  # Attached :5000/data.json to the end of the public dns name to see results of individual instances
 
 
 @app.route("/analyse", methods=["POST"])
 def analyse():
     data = request.get_json()
     h = data.get(
-        "history"
+        "h"
     )  # the length of price history from which to generate mean and standard deviation
     d = data.get(
-        "shots"
+        "d"
     )  # the number of data points (shots) to generate in each r for calculating risk via simulated returns
-    t = data.get("buy_or_sell")
+    t = data.get("t")
     p = data.get(
-        "no_of_days"
+        "p"
     )  # the number of data points (shots) to generate in each r for calculating risk via simulated returns
     if warmup_state["service"].lower() == "ec2":
         lambda_client = boto3.client("lambda")
@@ -321,7 +316,17 @@ def analyse():
                 Payload=json.dumps(input_params),
             )
 
+        time.sleep(5)
+
+        endpoints = get_endpoints().get_json()
+        execution_times = [
+            requests.get(url).json()["execution_time"] for url in endpoints.values()
+        ]
+        execution_time = sum(execution_times) / len(execution_times)
+        total_time = execution_time * len(execution_times)
+
         averages = get_avg_vars9599().get_json()
+
 
         table.put_item(
             Item={
@@ -335,6 +340,8 @@ def analyse():
                 "av95": str(averages["var95"]),
                 "av99": str(averages["var99"]),
                 "profit_loss": str(get_tot_profit_loss().get_json()["profit_loss"]),
+                "time": str(f"{execution_time:.5f} seconds"),
+                "cost": str(f"${total_time * 0.0116:.5f}"),
             }
         )
 
@@ -346,11 +353,10 @@ def get_sig_vars9599():
     # Initialize the results for the VaR values
     var95 = []
     var99 = []
-    endpoints = get_endpoints().get_json()[0]
+    endpoints = get_endpoints().get_json()
 
     # Fetch data.json from each endpoint
     for url in endpoints.values():
-        url = f"http://{url}:5000/data.json"
         response = requests.get(url)
         try:
             data = response.json()
@@ -383,12 +389,11 @@ def get_avg_vars9599():
 
 @app.route("/get_sig_profit_loss", methods=["GET"])
 def get_sig_profit_loss():
-    endpoints = get_endpoints().get_json()[0]
+    endpoints = get_endpoints().get_json()
     try:
         profit_loss = []
         # Fetch data.json from each endpoint
         for url in endpoints.values():
-            url = f"http://{url}:5000/data.json"
             response = requests.get(url)
             data = response.json()
             profit_loss.extend(data["profit_loss"])
@@ -406,6 +411,24 @@ def get_tot_profit_loss():
     # except requests.exceptions.JSONDecodeError:
     #     return jsonify({"profit_loss": "0.0"})
     return jsonify({"profit_loss": total_profit_loss})
+
+
+@app.route("/get_time_cost", methods=["GET"])
+def get_time_cost():
+    dynamodb = boto3.resource("dynamodb")
+    table = dynamodb.Table(table_name)
+
+    # Scam the DynamoDB table for the latest results
+    response = table.scan()
+
+    if response["Items"]:
+        # Sort the items by timestamp in descending order and get the latest item
+        latest = sorted(
+            response["Items"], key=lambda x: x["timestamp"], reverse=True
+        )[0]
+        return jsonify(time=latest["time"], cost=latest["cost"])
+    else:
+        return jsonify(error="No items found"), 404
 
 
 @app.route("/get_chart_url", methods=["GET"])
@@ -429,8 +452,8 @@ def get_chart_url():
     return jsonify({"url": chart_url})
 
 
-@app.route("/audit", methods=["GET"])
-def audit():
+@app.route("/get_audit", methods=["GET"])
+def get_audit():
     # Fetch the results from the DynamoDB table
     dynamodb = boto3.resource("dynamodb")
     table = dynamodb.Table(table_name)
@@ -463,16 +486,22 @@ def reset():
 
 @app.route("/terminate", methods=["GET"])
 def terminate():
-    s = warmup_state["service"]
 
-    if s != None:
-        if s.lower() == "ec2":
-            helper.terminate_ec2_instances()
-            helper.terminate_dynamodb_tables(table_name)
+    def terminate_resources():
+        s = warmup_state["service"]
 
-    warmup_state["warm"] = False
-    warmup_state["service"] = None
-    warmup_state["terminated"] = True
+        if s != None:
+            if s.lower() == "ec2":
+                helper.terminate_ec2_instances()
+                helper.terminate_dynamodb_tables(table_name)
+
+        warmup_state["warm"] = False
+        warmup_state["service"] = None
+        warmup_state["terminated"] = True
+
+    # Start the termination process in a new thread
+    thread = threading.Thread(target=terminate_resources)
+    thread.start()
 
     return jsonify({"result": "ok"})
 
