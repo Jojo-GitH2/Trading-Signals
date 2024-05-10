@@ -407,8 +407,6 @@ def get_sig_profit_loss():
 def get_tot_profit_loss():
     profit_loss = get_sig_profit_loss().get_json()["profit_loss"]
     total_profit_loss = sum(profit_loss)
-    # except requests.exceptions.JSONDecodeError:
-    #     return jsonify({"profit_loss": "0.0"})
     return jsonify({"profit_loss": total_profit_loss})
 
 
